@@ -44,13 +44,11 @@ def main() -> None:
     app = QApplication(sys.argv)
     apply_dark_palette(app)
 
-    # Placeholder — replaced in Phase 6 with MainWindow
-    window = QMainWindow()
-    window.setWindowTitle("CameraProjekt1")
-    window.setMinimumSize(1280, 800)
-    label = QLabel("CameraProjekt1 — inicializácia...", window)
-    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-    window.setCentralWidget(label)
+    from core.profile_manager import ProfileManager
+    from ui.main_window import MainWindow
+
+    pm = ProfileManager()
+    window = MainWindow(pm)
     window.show()
 
     sys.exit(app.exec())
