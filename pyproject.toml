@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "cameraprojekt1"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "PyQt6>=6.5",
+    "opencv-python>=4.8",
+    "torch>=2.1",
+    "torchvision>=0.16",
+    "numpy>=1.24",
+    "tqdm>=4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests requiring DexiNed weights download",
+    "gui: marks tests requiring a display / QApplication",
+]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["core*", "models*", "ui*"]
