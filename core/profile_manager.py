@@ -67,8 +67,10 @@ def _default_profile(profile_id: int) -> dict:
 class ProfileManager:
     """Správa profilov (vytvorenie, načítanie, uloženie, zmazanie, duplikácia)."""
 
-    def __init__(self, base_dir: Path) -> None:
-        self.base_dir = Path(base_dir)
+    _DEFAULT_BASE_DIR = Path(__file__).parent.parent / "profiles"
+
+    def __init__(self, base_dir: Path | None = None) -> None:
+        self.base_dir = Path(base_dir) if base_dir is not None else self._DEFAULT_BASE_DIR
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
