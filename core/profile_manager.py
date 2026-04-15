@@ -176,8 +176,8 @@ class ProfileManager:
 
         data["id"] = new_id
         data["name"] = f"Profile{new_id}"
-        data["paths"]["reference_image"] = f"profiles/{new_id}/reference.png"
-        data["paths"]["segment_map"] = f"profiles/{new_id}/segment_map.png"
+        data["paths"]["reference_image"] = str(new_dir / "reference.png")
+        data["paths"]["segment_map"] = str(new_dir / "segment_map.png")
 
         tmp_path = new_json_path.with_suffix(".tmp")
         try:
