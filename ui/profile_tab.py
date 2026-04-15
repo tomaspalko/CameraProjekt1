@@ -526,9 +526,31 @@ class ProfileTab(QWidget):
         if self._show_edges and self._roi is not None:
             self._edge_timer.start(350)
 
+    def _ensure_dexined_weights(self) -> bool:
+        """Vrati True ak vaha existuju alebo boli uspesne stiahnuté. Inak False."""
+        from core.edge_detection import EdgeDetector
+        if EdgeDetector.WEIGHTS_PATH.exists():
+            return True
+        from PyQt6.QtWidgets import QDialog
+        from ui.widgets.download_progress_dialog import DownloadProgressDialog
+        dlg = DownloadProgressDialog(
+            EdgeDetector.WEIGHTS_URL, EdgeDetector.WEIGHTS_PATH, parent=self
+        )
+        return dlg.exec() == QDialog.DialogCode.Accepted
+
     def _run_edge_detection(self) -> None:
         if self._image is None or self._roi is None:
             return
+
+        # DexiNed: stiahni vahy ak chybaju
+        if self._radio_dexined.isChecked():
+            if not self._ensure_dexined_weights():
+                # Stiahnutie zlyhalo alebo bolo zrusene — prepni na Canny
+                self._radio_canny.blockSignals(True)
+                self._radio_canny.setChecked(True)
+                self._radio_canny.blockSignals(False)
+                return
+
         try:
             if self._radio_canny.isChecked():
                 edge_map = self._detector.run_canny(

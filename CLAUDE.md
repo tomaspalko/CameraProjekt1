@@ -243,16 +243,16 @@ One commit per phase. PR groupings:
 
 | Phase | Description | Status |
 |---|---|---|
-| 1 | Project scaffold + ProfileManager | ⬜ pending |
-| 2 | Edge detection (Canny + DexiNed) | ⬜ pending |
-| 3 | Segment processor | ⬜ pending |
-| 4 | Scale calculator | ⬜ pending |
-| 5 | Inspection engine (ECC) | ⬜ pending |
-| 6 | Image viewer widget + Main window | ⬜ pending |
-| 7 | Profile configuration tab (Tab 1) | ⬜ pending |
-| 8 | Inspection tab (Tab 2) | ⬜ pending |
-| 9 | Integration tests + black formatting | ⬜ pending |
-| 10 | DexiNed finalisation + download dialog + QA | ⬜ pending |
+| 1 | Project scaffold + ProfileManager | ✅ done |
+| 2 | Edge detection (Canny + DexiNed) | ✅ done |
+| 3 | Segment processor | ✅ done |
+| 4 | Scale calculator | ✅ done |
+| 5 | Inspection engine (ECC) | ✅ done |
+| 6 | Image viewer widget + Main window | ✅ done |
+| 7 | Profile configuration tab (Tab 1) | ✅ done |
+| 8 | Inspection tab (Tab 2) | ✅ done |
+| 9 | Integration tests + end-to-end validation | ✅ done |
+| 10 | DexiNed finalisation + download dialog + QA | ✅ done |
 
 ---
 
@@ -267,4 +267,4 @@ One commit per phase. PR groupings:
 
 ---
 
-*Last updated: Phase 0 — CLAUDE.md created*
+*Last updated: Phase 1 — projekt scaffold, ProfileManager, GitHub repo vytvorený*
