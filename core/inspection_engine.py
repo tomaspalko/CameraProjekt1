@@ -155,30 +155,47 @@ class InspectionEngine:
 
         t_start = time.perf_counter()
 
-        # --- Orezanie na ROI (s rozšírením pre vyhľadávanie) ---
-        ref_crop = self._crop_gray(reference_image, rx - ex, ry - ex, rw + 2 * ex, rh + 2 * ex)
-        seg_crop = self._crop_gray(segment_map,     rx - ex, ry - ex, rw + 2 * ex, rh + 2 * ex)
+        # --- Orezanie na pôvodnú ROI (bez expanzie) — ECC vždy beží na tejto oblasti ---
+        # Expanzia mení súradnicový priestor warpu, čo by ovplyvnilo výpočet polohy.
+        ref_crop = self._crop_gray(reference_image, rx, ry, rw, rh)
+        seg_crop = self._crop_gray(segment_map,     rx, ry, rw, rh)
         insp_crop = self._crop_gray(
             inspection_image,
-            rx - ex + ox, ry - ex + oy, rw + 2 * ex, rh + 2 * ex,
+            rx + ox, ry + oy, rw, rh,
             clamp_shape=reference_image.shape[:2],
         )
 
         # --- Edge detection na inšpekčnom výreze (konzistentné s template) ---
         insp_ecc = self._prepare_ecc_input(insp_crop, edge_method, edge_params or {})
 
+        # --- Pre template matching: rozšírená oblasť hľadania (iba inspekčný výrez) ---
+        # Referenčný výrez zostáva pôvodnej veľkosti (je to šablóna).
+        # Výsledok dx/dy sa koriguje o ex (kompenzácia rozšírenia).
+        if ex > 0 and alignment_strategy != AlignmentStrategy.ECC_ONLY:
+            insp_crop_search = self._crop_gray(
+                inspection_image,
+                rx + ox - ex, ry + oy - ex, rw + 2 * ex, rh + 2 * ex,
+                clamp_shape=reference_image.shape[:2],
+            )
+        else:
+            insp_crop_search = insp_crop
+
         # --- Zarovnanie podľa zvolenej stratégie ---
         if alignment_strategy == AlignmentStrategy.TEMPLATE_ONLY:
-            # Template matching pracuje na reálnych fotografických dátach (ref vs insp),
-            # nie na segment mape — obe sú z rovnakej domény, čo dáva správnu koreláciu.
-            dx, dy = self._align_template(ref_crop, insp_crop, search_expansion, tm_method)
+            # Template matching: ref_crop je šablóna, insp_crop_search je rozšírená oblasť.
+            # Odčítame ex, pretože insp_crop_search začína o ex skôr ako insp_crop.
+            dx, dy = self._align_template(ref_crop, insp_crop_search, search_expansion, tm_method)
+            dx -= ex
+            dy -= ex
             warp_matrix = self._build_translation_warp(dx, dy)
             motion_type = cv2.MOTION_TRANSLATION  # rotácia = 0 pre čistú transláciu
 
         elif alignment_strategy == AlignmentStrategy.TEMPLATE_THEN_ECC:
-            # Hrubé zarovnanie: template matching na reálnych obrázkoch (ref vs insp)
-            # Jemné zarovnanie: ECC na segment mape (hranové štruktúry)
-            dx, dy = self._align_template(ref_crop, insp_crop, search_expansion, tm_method)
+            # Hrubé zarovnanie: template matching na rozšírenej oblasti
+            # Jemné zarovnanie: ECC na pôvodnej ROI s translačným seedom
+            dx, dy = self._align_template(ref_crop, insp_crop_search, search_expansion, tm_method)
+            dx -= ex
+            dy -= ex
             warp_init = self._build_translation_warp(dx, dy)
             warp_matrix = self._align_ecc(
                 seg_crop, insp_ecc, motion_type, max_iter, epsilon, warp_init
@@ -192,17 +209,16 @@ class InspectionEngine:
         duration_ms = (time.perf_counter() - t_start) * 1000.0
 
         # --- Transformácia tažiska ---
-        # Centroid je v full-image priestore; prevedieme do (rozšíreného) ROI priestoru,
-        # aplikujeme warp (template→inspection), potom prevedieme späť.
-        # Rozšírenie (ex) sa odčíta aj pridá späť — nemá vplyv na výsledný posun.
+        # Centroid je v full-image priestore; prevedieme do pôvodného ROI priestoru,
+        # aplikujeme warp, potom prevedieme späť. Expanzia tu nevstupuje.
         centroid_ref_roi = (
-            centroid_ref[0] - (rx - ex),
-            centroid_ref[1] - (ry - ex),
+            centroid_ref[0] - rx,
+            centroid_ref[1] - ry,
         )
         centroid_insp_roi = self._transform_point(centroid_ref_roi, warp_matrix, motion_type)
         centroid_insp_px = (
-            centroid_insp_roi[0] + (rx - ex) + ox,
-            centroid_insp_roi[1] + (ry - ex) + oy,
+            centroid_insp_roi[0] + rx + ox,
+            centroid_insp_roi[1] + ry + oy,
         )
 
         # --- Rotácia ---
