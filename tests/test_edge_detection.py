@@ -94,7 +94,7 @@ def test_canny_high_threshold_fewer_edges(detector, circle_gray):
 
 
 # ---------------------------------------------------------------------------
-# DexiNed testy (7–9) — vyžadujú stiahnuté váhy a torch
+# DexiNed testy (7–9) — vyžadujú stiahnuté ONNX váhy
 # ---------------------------------------------------------------------------
 
 @skip_dexined
@@ -124,33 +124,31 @@ def test_dexined_confidence_threshold_effect(detector, circle_gray):
 
 
 # ---------------------------------------------------------------------------
-# Test sťahovania váh (10) — mockuje urllib, nevyžaduje internet
+# Test sťahovania váh (10) — nevyžaduje internet
 # ---------------------------------------------------------------------------
 
-def test_weight_download_called_when_missing(
+def test_dexined_raises_when_weights_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
-    Keď váhy neexistujú, _ensure_weights musí zavolať urlretrieve.
-    Skutočné sťahovanie je mockované — test nepotrebuje internet.
+    Keď ONNX model neexistuje, run_dexined musí vyhodiť FileNotFoundError.
+    GUI zabezpečuje stiahnutie pred zavolaním run_dexined.
     """
     detector = EdgeDetector()
-
-    # Presmeruj WEIGHTS_PATH na dočasný adresár
-    fake_weights = tmp_path / "dexined.pth"
+    fake_weights = tmp_path / "dexined.onnx"
     monkeypatch.setattr(EdgeDetector, "WEIGHTS_PATH", fake_weights)
     assert not fake_weights.exists()
 
-    calls: list[str] = []
+    img = np.zeros((64, 64), dtype=np.uint8)
+    with pytest.raises(FileNotFoundError, match="DexiNed"):
+        detector.run_dexined(img)
 
-    def fake_urlretrieve(url: str, dest: str) -> None:
-        calls.append(url)
-        # Vytvor falošný súbor > 1 MB aby prešla kontrola veľkosti
-        Path(dest).write_bytes(b"X" * 1_100_000)
 
-    with patch("urllib.request.urlretrieve", side_effect=fake_urlretrieve):
-        detector._ensure_weights()
+def test_dexined_weights_path_is_onnx() -> None:
+    """WEIGHTS_PATH musí ukazovať na .onnx súbor."""
+    assert EdgeDetector.WEIGHTS_PATH.suffix == ".onnx"
 
-    assert len(calls) == 1, "urlretrieve malo byť zavolané presne raz"
-    assert calls[0] == EdgeDetector.WEIGHTS_URL
-    assert fake_weights.exists(), "Súbor váh nebol vytvorený"
+
+def test_dexined_weights_url_points_to_huggingface() -> None:
+    """WEIGHTS_URL musí ukazovať na HuggingFace."""
+    assert "huggingface.co" in EdgeDetector.WEIGHTS_URL

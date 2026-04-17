@@ -5,29 +5,33 @@ Obe metódy vracajú binárnu uint8 mapu hrán rovnakej veľkosti ako vstupný o
 s hodnotami iba {0, 255}.
 
 DexiNed:
-  - Váhy sa automaticky stiahnu pri prvom volaní run_dexined() (~50 MB).
-  - Sťahovanie: URL → .tmp súbor → os.replace (atomická operácia).
-  - Model sa načíta lenivo (lazy) a uloží na self._model.
-  - torch a models.dexined.model sa importujú iba keď sú skutočne potrebné.
+  - ONNX model uložený v models/dexined/weights/dexined.onnx (~15 MB).
+  - Inferencia cez cv2.dnn — PyTorch nie je potrebný.
+  - Ak chýba, GUI ho stiahne cez DownloadProgressDialog (urllib).
+  - Model sa načíta lenivo (lazy) a uloží do modul-level cache.
 """
 
 from __future__ import annotations
 
-import os
-import urllib.request
+import threading
 from pathlib import Path
 from typing import Optional
 
 import cv2
 import numpy as np
 
-# URL pre pred-trénované váhy DexiNed (verzia z publikovaného článku)
+# URL pre ONNX model z OpenCV HuggingFace
 _WEIGHTS_URL = (
-    "https://github.com/xavysp/DexiNed/releases/download/v1.0/10_model.pth"
+    "https://huggingface.co/opencv/edge_detection_dexined/resolve/main/"
+    "edge_detection_dexined_2024sep.onnx"
 )
 _WEIGHTS_PATH = (
-    Path(__file__).parent.parent / "models" / "dexined" / "weights" / "dexined.pth"
+    Path(__file__).parent.parent / "models" / "dexined" / "weights" / "dexined.onnx"
 )
+
+# Modul-level cache: cv2.dnn.Net nie je thread-safe → lock pri forward()
+_dexined_cache: dict = {}
+_dexined_lock = threading.Lock()
 
 
 class EdgeDetector:
@@ -42,10 +46,6 @@ class EdgeDetector:
 
     WEIGHTS_URL: str = _WEIGHTS_URL
     WEIGHTS_PATH: Path = _WEIGHTS_PATH
-
-    def __init__(self) -> None:
-        self._model: Optional[object] = None
-        self._device: Optional[object] = None
 
     # ------------------------------------------------------------------
     # Canny
@@ -72,8 +72,7 @@ class EdgeDetector:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         else:
             gray = image.copy()
-        edges = cv2.Canny(gray, threshold1, threshold2)
-        return edges  # cv2.Canny vracia uint8 s hodnotami {0, 255}
+        return cv2.Canny(gray, threshold1, threshold2)
 
     # ------------------------------------------------------------------
     # DexiNed
@@ -85,9 +84,10 @@ class EdgeDetector:
         confidence: float = 0.5,
     ) -> np.ndarray:
         """
-        Detekuje hrany pomocou DexiNed deep learning modelu.
+        Detekuje hrany pomocou DexiNed deep learning modelu (cv2.dnn + ONNX).
 
-        Pri prvom volaní automaticky stiahne váhy (~50 MB) a načíta model.
+        Pri prvom volaní načíta ONNX model z disku (lazy). Ak váhy chýbajú,
+        vyhodí FileNotFoundError — GUI ich stiahne cez DownloadProgressDialog.
 
         Args:
             image:      Vstupný obrázok (grayscale alebo BGR uint8).
@@ -96,89 +96,60 @@ class EdgeDetector:
         Returns:
             Binárna uint8 mapa hrán (0 / 255), rovnaké H×W ako vstup.
         """
-        import torch  # lazy import — Canny testy nevyžadujú torch
+        global _dexined_cache
 
-        self._ensure_weights()
-        self._load_model()
+        path = str(self.WEIGHTS_PATH)
+        if not self.WEIGHTS_PATH.exists():
+            raise FileNotFoundError(
+                f"DexiNed model nenájdený: {path}\n"
+                "Spustite aplikáciu s pripojením na internet — "
+                "pri prvom použití DexiNed sa stiahne automaticky cez GUI."
+            )
 
-        # Preprocess: konvertuj na BGR float32 normalizovaný
+        # Lazy-load: znovu načítaj iba ak sa zmenila cesta
+        if _dexined_cache.get("path") != path:
+            net = cv2.dnn.readNetFromONNX(path)
+            net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+            net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+            _dexined_cache = {"path": path, "net": net}
+
+        net = _dexined_cache["net"]
+
+        # Preprocess: grayscale → BGR float32
         if image.ndim == 2:
-            bgr = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+            bgr = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR).astype(np.float32)
         else:
-            bgr = image.copy()
+            bgr = image.astype(np.float32)
 
-        img = bgr.astype(np.float32) / 255.0
-        # ImageNet normalizácia (RGB poradie)
-        rgb = img[:, :, ::-1].copy()  # BGR → RGB
-        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-        rgb = (rgb - mean) / std
+        # VGG-štýl: odčítanie BGR priemerov (bez delenia /255)
+        bgr -= np.array([103.939, 116.779, 123.68], dtype=np.float32)
 
-        tensor = torch.from_numpy(rgb.transpose(2, 0, 1)).unsqueeze(0)
-        tensor = tensor.to(self._device)
+        h_orig, w_orig = bgr.shape[:2]
 
-        with torch.no_grad():
-            outputs = self._model(tensor)
+        # Pad na násobok 32 — DexiNed je fully convolutional, zachová pixel-súradnice
+        h_pad = ((h_orig + 31) // 32) * 32
+        w_pad = ((w_orig + 31) // 32) * 32
+        if h_pad != h_orig or w_pad != w_orig:
+            bgr = cv2.copyMakeBorder(
+                bgr, 0, h_pad - h_orig, 0, w_pad - w_orig, cv2.BORDER_REFLECT
+            )
 
-        # Posledný výstup = fused, aplikuj sigmoid
-        fused = torch.sigmoid(outputs[-1]).squeeze().cpu().numpy()
-        binary = (fused >= confidence).astype(np.uint8) * 255
+        # HWC → NCHW blob
+        blob = cv2.dnn.blobFromImage(bgr, scalefactor=1.0, swapRB=False)
+
+        with _dexined_lock:
+            net.setInput(blob)
+            out = net.forward()   # (1, 1, H_pad, W_pad)
+
+        # Crop padding, squeeze batch+channel
+        fused = out[0, 0, :h_orig, :w_orig].astype(np.float32)
+
+        # Sigmoid + threshold
+        prob = 1.0 / (1.0 + np.exp(-fused))
+        binary = (prob >= confidence).astype(np.uint8) * 255
+
+        # Morfologický cleanup — odstráni izolované body
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+
         return binary
-
-    # ------------------------------------------------------------------
-    # Interné metódy
-    # ------------------------------------------------------------------
-
-    def _ensure_weights(self) -> None:
-        """
-        Stiahne váhy DexiNed ak ešte neexistujú.
-        Používa atomický zápis: .tmp → os.replace.
-        Raises RuntimeError ak súbor je príliš malý (sťahovanie zlyhalo).
-        """
-        if self.WEIGHTS_PATH.exists():
-            return
-
-        self.WEIGHTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.WEIGHTS_PATH.with_suffix(".tmp")
-
-        try:
-            print(f"Sťahujem DexiNed váhy z: {self.WEIGHTS_URL}")
-            urllib.request.urlretrieve(str(self.WEIGHTS_URL), str(tmp_path))
-
-            if tmp_path.stat().st_size < 1_000_000:
-                raise RuntimeError(
-                    "Stiahnutý súbor váh je príliš malý — pravdepodobne chyba sťahovania."
-                )
-
-            os.replace(tmp_path, self.WEIGHTS_PATH)
-            print(f"Váhy uložené: {self.WEIGHTS_PATH}")
-
-        except Exception:
-            if tmp_path.exists():
-                tmp_path.unlink()
-            raise
-
-    def _load_model(self) -> None:
-        """
-        Lenivo načíta DexiNed model zo súboru váh.
-        Model je uložený na self._model a zavolaný iba raz.
-        """
-        if self._model is not None:
-            return
-
-        import torch
-        from models.dexined.model import DexiNed
-
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = DexiNed()
-        state = torch.load(
-            str(self.WEIGHTS_PATH),
-            map_location=device,
-            weights_only=True,
-        )
-        model.load_state_dict(state)
-        model.eval()
-        model.to(device)
-
-        self._model = model
-        self._device = device

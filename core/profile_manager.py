@@ -34,6 +34,8 @@ REQUIRED_KEYS: frozenset[str] = frozenset(
         "ecc_params",
         "roi_inspection_offset",
         "paths",
+        "alignment_strategy",
+        "template_params",
     }
 )
 
@@ -61,7 +63,25 @@ def _default_profile(profile_id: int) -> dict:
             "reference_image": f"profiles/{profile_id}/reference.png",
             "segment_map": f"profiles/{profile_id}/segment_map.png",
         },
+        "alignment_strategy": "ecc_only",
+        "template_params": {
+            "search_expansion": 0.5,
+            "method": "TM_CCOEFF_NORMED",
+        },
     }
+
+
+def _migrate_profile(data: dict) -> dict:
+    """
+    Dopĺňa kľúče pridané po počiatočnej verzii schémy.
+    Používa setdefault — existujúce hodnoty sa nemenia.
+    """
+    data.setdefault("alignment_strategy", "ecc_only")
+    data.setdefault("template_params", {
+        "search_expansion": 0.5,
+        "method": "TM_CCOEFF_NORMED",
+    })
+    return data
 
 
 class ProfileManager:
@@ -123,6 +143,7 @@ class ProfileManager:
             raise FileNotFoundError(f"Profil {profile_id} nebol nájdený.")
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
+        data = _migrate_profile(data)
         self.validate_schema(data)
         return data
 

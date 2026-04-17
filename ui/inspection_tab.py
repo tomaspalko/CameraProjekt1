@@ -37,7 +37,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from core.inspection_engine import InspectionEngine, InspectionResult
+from core.inspection_engine import AlignmentStrategy, InspectionEngine, InspectionResult
 from core.profile_manager import ProfileManager
 from core.segment_processor import SegmentProcessor
 from ui.widgets.image_viewer import ImageViewer
@@ -64,6 +64,10 @@ class InspectionWorker(QObject):
         roi_offset: tuple,
         ecc_params: dict,
         px_per_mm: Optional[float],
+        edge_method: str = "canny",
+        edge_params: Optional[dict] = None,
+        alignment_strategy: AlignmentStrategy = AlignmentStrategy.ECC_ONLY,
+        template_params: Optional[dict] = None,
     ) -> None:
         super().__init__()
         self._engine = engine
@@ -75,6 +79,10 @@ class InspectionWorker(QObject):
         self._roi_offset = roi_offset
         self._ecc_params = ecc_params
         self._px_per_mm = px_per_mm
+        self._edge_method = edge_method
+        self._edge_params = edge_params or {}
+        self._alignment_strategy = alignment_strategy
+        self._template_params = template_params or {}
 
     def run(self) -> None:
         try:
@@ -87,6 +95,10 @@ class InspectionWorker(QObject):
                 roi_offset=self._roi_offset,
                 ecc_params=self._ecc_params,
                 px_per_mm=self._px_per_mm,
+                edge_method=self._edge_method,
+                edge_params=self._edge_params,
+                alignment_strategy=self._alignment_strategy,
+                template_params=self._template_params,
             )
             self.result_ready.emit(result)
         except Exception as exc:
@@ -96,6 +108,13 @@ class InspectionWorker(QObject):
 # ---------------------------------------------------------------------------
 # InspectionTab
 # ---------------------------------------------------------------------------
+
+_STRATEGY_MAP: dict[str, str] = {
+    "ECC only":                  "ecc_only",
+    "Template matching only":    "template_only",
+    "Template matching + ECC":   "template_then_ecc",
+}
+_STRATEGY_REVERSE_MAP: dict[str, str] = {v: k for k, v in _STRATEGY_MAP.items()}
 
 _RELIABILITY_COLORS = {
     "HIGH": "#00c853",
@@ -216,11 +235,24 @@ class InspectionTab(QWidget):
         parent.addWidget(box)
 
     def _build_ecc_section(self, parent: QVBoxLayout) -> None:
-        box = QGroupBox("ECC parametre")
+        box = QGroupBox("Zarovnanie")
         box.setStyleSheet("QGroupBox { font-weight: bold; margin-top: 6px; } "
                           "QGroupBox::title { subcontrol-origin: margin; left: 6px; }")
         layout = QFormLayout(box)
         layout.setSpacing(4)
+
+        # --- Voľba stratégie ---
+        self._combo_strategy = QComboBox()
+        self._combo_strategy.addItems(list(_STRATEGY_MAP.keys()))
+        self._combo_strategy.setCurrentText("ECC only")
+        self._combo_strategy.currentIndexChanged.connect(self._on_strategy_changed)
+        layout.addRow("Strategia:", self._combo_strategy)
+
+        # --- ECC parametre (skrytelný blok) ---
+        self._ecc_params_widget = QWidget()
+        ecc_form = QFormLayout(self._ecc_params_widget)
+        ecc_form.setContentsMargins(0, 0, 0, 0)
+        ecc_form.setSpacing(4)
 
         self._combo_motion = QComboBox()
         self._combo_motion.addItems([
@@ -229,17 +261,41 @@ class InspectionTab(QWidget):
             "MOTION_AFFINE",
         ])
         self._combo_motion.setCurrentText("MOTION_EUCLIDEAN")
-        layout.addRow("Typ pohybu:", self._combo_motion)
+        ecc_form.addRow("Typ pohybu:", self._combo_motion)
 
         self._spin_max_iter = QSpinBox()
         self._spin_max_iter.setRange(10, 5000)
         self._spin_max_iter.setValue(200)
-        layout.addRow("Max iteracii:", self._spin_max_iter)
+        ecc_form.addRow("Max iteracii:", self._spin_max_iter)
 
         self._edit_epsilon = QLineEdit("1e-5")
-        layout.addRow("Epsilon:", self._edit_epsilon)
+        ecc_form.addRow("Epsilon:", self._edit_epsilon)
 
-        # ROI offset
+        layout.addRow(self._ecc_params_widget)
+
+        # --- Template matching parametre (skrytelný blok) ---
+        self._tm_params_widget = QWidget()
+        tm_form = QFormLayout(self._tm_params_widget)
+        tm_form.setContentsMargins(0, 0, 0, 0)
+        tm_form.setSpacing(4)
+
+        self._spin_tm_expansion = QDoubleSpinBox()
+        self._spin_tm_expansion.setRange(0.1, 5.0)
+        self._spin_tm_expansion.setSingleStep(0.1)
+        self._spin_tm_expansion.setValue(0.5)
+        self._spin_tm_expansion.setToolTip(
+            "Rozšírenie oblasti hľadania.\n"
+            "0.5 = hľadá sa v okruhu ±50 % rozmeru ROI od stredu."
+        )
+        tm_form.addRow("Search expansion:", self._spin_tm_expansion)
+
+        self._combo_tm_method = QComboBox()
+        self._combo_tm_method.addItems(["TM_CCOEFF_NORMED", "TM_CCORR_NORMED"])
+        tm_form.addRow("TM metoda:", self._combo_tm_method)
+
+        layout.addRow(self._tm_params_widget)
+
+        # --- ROI offset ---
         offset_row = QHBoxLayout()
         self._spin_dx = QSpinBox()
         self._spin_dx.setRange(-4096, 4096)
@@ -253,7 +309,7 @@ class InspectionTab(QWidget):
         offset_row.addWidget(self._spin_dy)
         layout.addRow("ROI offset:", offset_row)
 
-        # Restore ECC params from profile
+        # --- Obnova hodnôt z profilu ---
         ecc = self._profile.get("ecc_params", {})
         if ecc.get("motion_type") in ("MOTION_TRANSLATION", "MOTION_EUCLIDEAN", "MOTION_AFFINE"):
             self._combo_motion.setCurrentText(ecc["motion_type"])
@@ -264,7 +320,29 @@ class InspectionTab(QWidget):
         self._spin_dx.setValue(int(offset.get("dx", 0)))
         self._spin_dy.setValue(int(offset.get("dy", 0)))
 
+        strategy_str = self._profile.get("alignment_strategy", "ecc_only")
+        self._combo_strategy.setCurrentText(
+            _STRATEGY_REVERSE_MAP.get(strategy_str, "ECC only")
+        )
+
+        tm_p = self._profile.get("template_params", {})
+        self._spin_tm_expansion.setValue(float(tm_p.get("search_expansion", 0.5)))
+        tm_method = tm_p.get("method", "TM_CCOEFF_NORMED")
+        if tm_method in ("TM_CCOEFF_NORMED", "TM_CCORR_NORMED"):
+            self._combo_tm_method.setCurrentText(tm_method)
+
+        # Nastaví počiatočnú viditeľnosť blokoch
+        self._on_strategy_changed(self._combo_strategy.currentIndex())
+
         parent.addWidget(box)
+
+    def _on_strategy_changed(self, _index: int) -> None:
+        """Zobrazí / skryje ECC a TM bloky podľa zvolenej stratégie."""
+        strategy = self._combo_strategy.currentText()
+        show_ecc = strategy in ("ECC only", "Template matching + ECC")
+        show_tm  = strategy in ("Template matching only", "Template matching + ECC")
+        self._ecc_params_widget.setVisible(show_ecc)
+        self._tm_params_widget.setVisible(show_tm)
 
     def _build_overlay_section(self, parent: QVBoxLayout) -> None:
         self._chk_show_segments = QCheckBox("Zobrazit segmenty na vieweroch")
@@ -445,6 +523,21 @@ class InspectionTab(QWidget):
 
         px_per_mm = self._profile.get("scale_px_per_mm")
 
+        edge_method = self._profile.get("edge_method", "canny")
+        if edge_method == "dexined":
+            edge_params = self._profile.get("dexined_params", {})
+        else:
+            edge_params = self._profile.get("canny_params", {})
+
+        # Stratégia zarovnania
+        strategy_str = _STRATEGY_MAP.get(self._combo_strategy.currentText(), "ecc_only")
+        alignment_strategy = AlignmentStrategy(strategy_str)
+
+        template_params = {
+            "search_expansion": self._spin_tm_expansion.value(),
+            "method": self._combo_tm_method.currentText(),
+        }
+
         # Zablokuj tlacidlo pocas behu
         self._btn_run.setEnabled(False)
         self._btn_run.setText("Prebieha...")
@@ -461,6 +554,10 @@ class InspectionTab(QWidget):
             roi_offset=roi_offset,
             ecc_params=ecc_params,
             px_per_mm=px_per_mm,
+            edge_method=edge_method,
+            edge_params=edge_params,
+            alignment_strategy=alignment_strategy,
+            template_params=template_params,
         )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)

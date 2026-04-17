@@ -280,6 +280,7 @@ class ProfileTab(QWidget):
         self._radio_canny.setEnabled(False)
         self._radio_dexined.setEnabled(False)
         self._radio_canny.toggled.connect(self._on_method_changed)
+        self._radio_dexined.toggled.connect(self._on_method_changed)
         radio_row.addWidget(self._radio_canny)
         radio_row.addWidget(self._radio_dexined)
         layout.addLayout(radio_row)

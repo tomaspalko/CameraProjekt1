@@ -1,7 +1,12 @@
 """
-InspectionEngine — vyhľadanie segmentov v inšpekčnom obrázku pomocou ECC.
+InspectionEngine — vyhľadanie segmentov v inšpekčnom obrázku.
 
-Algoritmus:
+Podporované stratégie zarovnania (AlignmentStrategy):
+  ECC_ONLY          – pôvodné správanie: cv2.findTransformECC
+  TEMPLATE_ONLY     – cv2.matchTemplate, len translácia (rýchly, veľký rozsah)
+  TEMPLATE_THEN_ECC – hrubé zarovnanie cez matchTemplate, jemné cez ECC
+
+Algoritmus (ECC_ONLY):
   1. Orezanie referenčného obrázka a inšpekčného obrázka na ROI (+ offset).
   2. Konverzia na float32 grayscale.
   3. cv2.findTransformECC(template=segment_map_crop, input=inspection_crop).
@@ -13,6 +18,7 @@ Algoritmus:
 
 from __future__ import annotations
 
+import enum
 import math
 import time
 from dataclasses import dataclass
@@ -21,6 +27,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
+from core.edge_detection import EdgeDetector
 from core.scale_calculator import ScaleCalculator
 
 # Podporované typy pohybu pre ECC
@@ -30,8 +37,21 @@ MOTION_TYPES: dict[str, int] = {
     "MOTION_AFFINE": cv2.MOTION_AFFINE,
 }
 
+# Podporované metódy pre template matching
+_TM_METHODS: dict[str, int] = {
+    "TM_CCOEFF_NORMED": cv2.TM_CCOEFF_NORMED,
+    "TM_CCORR_NORMED": cv2.TM_CCORR_NORMED,
+}
+
 _RELIABILITY_HIGH = 0.8
 _RELIABILITY_MEDIUM = 0.5
+
+
+class AlignmentStrategy(enum.Enum):
+    """Stratégia zarovnania inšpekčného obrázka na referenčný."""
+    ECC_ONLY          = "ecc_only"
+    TEMPLATE_ONLY     = "template_only"
+    TEMPLATE_THEN_ECC = "template_then_ecc"
 
 
 @dataclass
@@ -52,7 +72,9 @@ class InspectionResult:
 
 class InspectionEngine:
     """
-    ECC-based vyhľadávanie segmentov v inšpekčnom obrázku.
+    Vyhľadávanie segmentov v inšpekčnom obrázku.
+
+    Podporuje tri stratégie zarovnania: ECC, template matching, alebo ich kombináciu.
 
     Args:
         scale_calculator: Voliteľný kalibrovaný ScaleCalculator pre mm výstupy.
@@ -60,6 +82,7 @@ class InspectionEngine:
 
     def __init__(self, scale_calculator: Optional[ScaleCalculator] = None) -> None:
         self._scale = scale_calculator
+        self._edge_detector = EdgeDetector()
 
     def run(
         self,
@@ -71,19 +94,29 @@ class InspectionEngine:
         roi_offset: tuple[int, int] = (0, 0),
         ecc_params: Optional[dict] = None,
         px_per_mm: Optional[float] = None,
+        edge_method: str = "canny",
+        edge_params: Optional[dict] = None,
+        alignment_strategy: AlignmentStrategy = AlignmentStrategy.ECC_ONLY,
+        template_params: Optional[dict] = None,
     ) -> InspectionResult:
         """
         Spustí inšpekciu.
 
         Args:
-            reference_image:  Referenčný obrázok (uint8, grayscale alebo BGR).
-            segment_map:      BGR mapa segmentov rovnakej veľkosti ako referenčný obrázok.
-            inspection_image: Inšpekčný obrázok — musí mať rovnaké rozmery ako reference_image.
-            centroid_ref:     (cx, cy) tažisko v referenčnom obrázku (full-image px).
-            roi:              (x, y, w, h) oblasť záujmu.
-            roi_offset:       (dx, dy) posun ROI pre inšpekčný obrázok.
-            ecc_params:       Slovník s kľúčmi: motion_type (str), max_iter (int), epsilon (float).
-            px_per_mm:        Ak zadané, vypočítajú sa aj mm výstupy.
+            reference_image:    Referenčný obrázok (uint8, grayscale alebo BGR).
+            segment_map:        BGR mapa segmentov rovnakej veľkosti ako referenčný obrázok.
+            inspection_image:   Inšpekčný obrázok — musí mať rovnaké rozmery ako reference_image.
+            centroid_ref:       (cx, cy) tažisko v referenčnom obrázku (full-image px).
+            roi:                (x, y, w, h) oblasť záujmu.
+            roi_offset:         (dx, dy) posun ROI pre inšpekčný obrázok.
+            ecc_params:         Slovník: motion_type (str), max_iter (int), epsilon (float).
+            px_per_mm:          Ak zadané, vypočítajú sa aj mm výstupy.
+            edge_method:        "canny" alebo "dexined".
+            edge_params:        Parametre detekcie hrán.
+            alignment_strategy: Jedna z AlignmentStrategy hodnôt.
+            template_params:    Slovník: search_expansion (float), method (str).
+                                search_expansion určuje, o koľkonásobok rozmeru ROI sa rozšíri
+                                oblasť hľadania (default 0.5 = ±50 % ROI).
 
         Returns:
             InspectionResult
@@ -99,11 +132,17 @@ class InspectionEngine:
                 f"({reference_image.shape[:2]})."
             )
 
-        params = ecc_params or {}
-        motion_type_str = params.get("motion_type", "MOTION_EUCLIDEAN")
+        # ECC parametre
+        ecc = ecc_params or {}
+        motion_type_str = ecc.get("motion_type", "MOTION_EUCLIDEAN")
         motion_type = MOTION_TYPES.get(motion_type_str, cv2.MOTION_EUCLIDEAN)
-        max_iter = int(params.get("max_iter", 200))
-        epsilon = float(params.get("epsilon", 1e-5))
+        max_iter = int(ecc.get("max_iter", 200))
+        epsilon = float(ecc.get("epsilon", 1e-5))
+
+        # Template matching parametre
+        tm = template_params or {}
+        search_expansion = float(tm.get("search_expansion", 0.5))
+        tm_method = _TM_METHODS.get(tm.get("method", "TM_CCOEFF_NORMED"), cv2.TM_CCOEFF_NORMED)
 
         rx, ry, rw, rh = roi
         ox, oy = roi_offset
@@ -119,25 +158,30 @@ class InspectionEngine:
             clamp_shape=reference_image.shape[:2],
         )
 
-        # --- ECC registrácia ---
-        warp_matrix = self._init_warp_matrix(motion_type)
-        criteria = (
-            cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
-            max_iter,
-            epsilon,
-        )
+        # --- Edge detection na inšpekčnom výreze (konzistentné s template) ---
+        insp_ecc = self._prepare_ecc_input(insp_crop, edge_method, edge_params or {})
 
-        try:
-            _, warp_matrix = cv2.findTransformECC(
-                templateImage=seg_crop.astype(np.float32),
-                inputImage=insp_crop.astype(np.float32),
-                warpMatrix=warp_matrix,
-                motionType=motion_type,
-                criteria=criteria,
+        # --- Zarovnanie podľa zvolenej stratégie ---
+        if alignment_strategy == AlignmentStrategy.TEMPLATE_ONLY:
+            # Template matching pracuje na reálnych fotografických dátach (ref vs insp),
+            # nie na segment mape — obe sú z rovnakej domény, čo dáva správnu koreláciu.
+            dx, dy = self._align_template(ref_crop, insp_crop, search_expansion, tm_method)
+            warp_matrix = self._build_translation_warp(dx, dy)
+            motion_type = cv2.MOTION_TRANSLATION  # rotácia = 0 pre čistú transláciu
+
+        elif alignment_strategy == AlignmentStrategy.TEMPLATE_THEN_ECC:
+            # Hrubé zarovnanie: template matching na reálnych obrázkoch (ref vs insp)
+            # Jemné zarovnanie: ECC na segment mape (hranové štruktúry)
+            dx, dy = self._align_template(ref_crop, insp_crop, search_expansion, tm_method)
+            warp_init = self._build_translation_warp(dx, dy)
+            warp_matrix = self._align_ecc(
+                seg_crop, insp_ecc, motion_type, max_iter, epsilon, warp_init
             )
-        except cv2.error:
-            # ECC môže zlyháť pri veľmi nízkej konvergencii — použijeme identitu
-            warp_matrix = self._init_warp_matrix(motion_type)
+
+        else:  # ECC_ONLY (default)
+            warp_matrix = self._align_ecc(
+                seg_crop, insp_ecc, motion_type, max_iter, epsilon
+            )
 
         duration_ms = (time.perf_counter() - t_start) * 1000.0
 
@@ -195,8 +239,118 @@ class InspectionEngine:
         )
 
     # ------------------------------------------------------------------
-    # Interné pomocné metódy
+    # Interné zarovnávacie metódy
     # ------------------------------------------------------------------
+
+    def _align_ecc(
+        self,
+        template: np.ndarray,
+        query: np.ndarray,
+        motion_type: int,
+        max_iter: int,
+        epsilon: float,
+        warp_init: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """
+        Spustí cv2.findTransformECC.
+
+        Args:
+            warp_init: Počiatočná warp matica. Ak None, použije sa identita.
+                       Pre TEMPLATE_THEN_ECC sa odovzdá translačný výsledok
+                       z template matchingu ako seed.
+        """
+        warp_matrix = warp_init.copy() if warp_init is not None else self._init_warp_matrix(motion_type)
+        criteria = (
+            cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
+            max_iter,
+            epsilon,
+        )
+        try:
+            _, warp_matrix = cv2.findTransformECC(
+                templateImage=template.astype(np.float32),
+                inputImage=query.astype(np.float32),
+                warpMatrix=warp_matrix,
+                motionType=motion_type,
+                criteria=criteria,
+            )
+        except cv2.error:
+            # ECC nedokonvergoval — zachovajme seed (warp_init) ak existuje,
+            # inak vrátime identitu. Pre TEMPLATE_THEN_ECC tak zachováme hrubé
+            # translačné zarovnanie z template matchingu.
+            warp_matrix = warp_init.copy() if warp_init is not None else self._init_warp_matrix(motion_type)
+        return warp_matrix
+
+    def _align_template(
+        self,
+        template: np.ndarray,
+        query: np.ndarray,
+        search_expansion: float = 0.5,
+        method: int = cv2.TM_CCOEFF_NORMED,
+    ) -> tuple[float, float]:
+        """
+        Nájde translačný posun pomocou cv2.matchTemplate.
+
+        Oblasť hľadania sa rozšíri paddingom o search_expansion * rozmery šablóny
+        na každú stranu. Vracia (dx, dy) — posun inšpekčného obrázka voči referenčnému.
+
+        Args:
+            template: Výrez segment mapy (grayscale).
+            query:    Edge-detected výrez inšpekčného obrázka (grayscale).
+            search_expansion: Rozšírenie oblasti hľadania (0.5 = ±50 % rozmeru ROI).
+            method:   Metóda matchTemplate (TM_CCOEFF_NORMED alebo TM_CCORR_NORMED).
+
+        Returns:
+            (dx, dy) posun v pixeloch.
+        """
+        pad_x = max(1, int(template.shape[1] * search_expansion))
+        pad_y = max(1, int(template.shape[0] * search_expansion))
+
+        padded = cv2.copyMakeBorder(
+            query.astype(np.float32),
+            pad_y, pad_y, pad_x, pad_x,
+            cv2.BORDER_REPLICATE,
+        )
+        tmpl_f = template.astype(np.float32)
+
+        if padded.shape[0] < tmpl_f.shape[0] or padded.shape[1] < tmpl_f.shape[1]:
+            raise ValueError(
+                f"Search area ({padded.shape}) je menší ako template ({tmpl_f.shape}). "
+                "Zvýšte search_expansion."
+            )
+
+        result = cv2.matchTemplate(padded, tmpl_f, method)
+        _, _, _, max_loc = cv2.minMaxLoc(result)
+
+        dx = float(max_loc[0] - pad_x)
+        dy = float(max_loc[1] - pad_y)
+        return dx, dy
+
+    @staticmethod
+    def _build_translation_warp(dx: float, dy: float) -> np.ndarray:
+        """Vráti 2×3 warp maticu pre čistú transláciu o (dx, dy)."""
+        M = np.eye(2, 3, dtype=np.float32)
+        M[0, 2] = dx
+        M[1, 2] = dy
+        return M
+
+    # ------------------------------------------------------------------
+    # Pomocné statické metódy
+    # ------------------------------------------------------------------
+
+    def _prepare_ecc_input(
+        self,
+        gray_crop: np.ndarray,
+        edge_method: str,
+        edge_params: dict,
+    ) -> np.ndarray:
+        """Aplikuje detekciu hrán na výrez pred ECC — konzistentné s template (segment_map)."""
+        if edge_method == "dexined":
+            confidence = edge_params.get("confidence", 0.5)
+            return self._edge_detector.run_dexined(gray_crop, confidence=confidence)
+        # default: canny
+        t1 = edge_params.get("threshold1", 50.0)
+        t2 = edge_params.get("threshold2", 150.0)
+        return self._edge_detector.run_canny(gray_crop, threshold1=t1, threshold2=t2)
 
     @staticmethod
     def _crop_gray(
@@ -272,7 +426,6 @@ class InspectionEngine:
         Vracia hodnotu v rozsahu [-1, 1].
         """
         try:
-            # Zarovnaj query podľa nájdenej warp matice
             h, w = template.shape[:2]
             if motion_type == cv2.MOTION_HOMOGRAPHY:
                 aligned = cv2.warpPerspective(

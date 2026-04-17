@@ -1,5 +1,5 @@
 """
-DownloadProgressDialog — modalne okno pre stiahnutie DexiNed vah.
+DownloadProgressDialog — modalne okno pre stiahnutie DexiNed modelu.
 
 Stiahnutie prebieha v QThread, takze GUI zostane responzivne.
 Podporuje zrusenie stiahnutia tlacidlom Cancel.
@@ -47,10 +47,13 @@ class _DownloadThread(QThread):
         self._dest.parent.mkdir(parents=True, exist_ok=True)
 
         try:
-            def _reporthook(block_num: int, block_size: int, total_size: int) -> None:
+            if self._cancelled:
+                raise InterruptedError("Stiahnutie zrusene uzivatelom.")
+
+            def _reporthook(count: int, block_size: int, total_size: int) -> None:
                 if self._cancelled:
                     raise InterruptedError("Stiahnutie zrusene uzivatelom.")
-                downloaded = block_num * block_size
+                downloaded = count * block_size
                 self.progress_updated.emit(downloaded, total_size)
 
             urllib.request.urlretrieve(self._url, str(tmp_path), reporthook=_reporthook)
@@ -75,7 +78,7 @@ class _DownloadThread(QThread):
 
 class DownloadProgressDialog(QDialog):
     """
-    Modalne okno so stiahnutim DexiNed vah v pozadi.
+    Modalne okno so stiahnutim DexiNed modelu v pozadi.
 
     Vrati QDialog.DialogCode.Accepted po uspesnom stiahnutii,
     QDialog.DialogCode.Rejected pri zruseni alebo chybe.
@@ -83,7 +86,7 @@ class DownloadProgressDialog(QDialog):
 
     def __init__(self, url: str, dest_path: Path, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Stiahnutie DexiNed vah")
+        self.setWindowTitle("Stiahnutie DexiNed modelu")
         self.setWindowFlags(
             self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint
         )
@@ -107,7 +110,7 @@ class DownloadProgressDialog(QDialog):
         layout.setSpacing(10)
 
         self._label_info = QLabel(
-            "Stiahuje sa DexiNed model (~ 50 MB).\n"
+            "Stiahuje sa DexiNed model (~ 15 MB).\n"
             f"Zdroj: {self._url[:60]}..."
         )
         self._label_info.setWordWrap(True)

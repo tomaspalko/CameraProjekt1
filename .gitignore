@@ -1,8 +1,8 @@
 # Runtime profile data
 profiles/
 
-# DexiNed pre-trained weights
-models/dexined/weights/
+# DexiNed — stare PyTorch vahy su ignorovane, ONNX model je sucastou repozitara
+models/dexined/weights/*.pth
 
 # Python cache
 __pycache__/

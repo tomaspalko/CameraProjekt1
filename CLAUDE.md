@@ -20,7 +20,7 @@ the centroid shift (x, y) + rotation of the selected segments is reported.
 | Language | Python 3.11+ |
 | GUI | PyQt6 |
 | Image processing | OpenCV (`cv2`) |
-| Deep learning | PyTorch — DexiNed edge detector |
+| Deep learning | OpenCV DNN (ONNX) — DexiNed edge detector, bez PyTorch |
 | Profile storage | JSON + filesystem |
 | Code formatting | ruff / standard PEP8 |
 | UI theme | Dark mode (čierne pozadie, svetlý text) |
@@ -45,8 +45,9 @@ CameraProjekt1/
 │   └── inspection_engine.py       # ECC matching, shift/rotation output
 ├── models/
 │   └── dexined/
-│       ├── model.py               # DexiNed PyTorch architecture
-│       └── weights/               # auto-downloaded (~50 MB), git-ignored
+│       ├── model.py               # DexiNed PyTorch architecture (nepoužívané, zachované)
+│       └── weights/
+│           └── dexined.onnx       # ONNX model (~47 MB), súčasť repozitára — offline použitie
 ├── ui/
 │   ├── main_window.py             # QMainWindow, profile list, tab switching
 │   ├── profile_tab.py             # Tab 1: configuration UI + state machine
@@ -213,16 +214,16 @@ Farebná paleta UI:
 ## Development Commands
 
 ```bash
-# Install dependencies
+# Install dependencies (PyTorch nie je potrebný)
 pip install -e .
 
-# Run fast tests (no DexiNed weights needed)
+# Run fast tests
 pytest -m "not slow and not gui" -v
 
-# Run DexiNed tests (downloads ~50 MB weights on first run)
+# Run DexiNed tests (vyžadujú models/dexined/weights/dexined.onnx — súčasť repozitára)
 DEXINED_TESTS=1 pytest -m "slow" -v
 
-# Launch the application
+# Launch the application (funguje offline — ONNX váhy sú v repozitári)
 python main.py
 ```
 
@@ -261,10 +262,10 @@ One commit per phase. PR groupings:
 - [ ] Load real photo → draw ROI → run Canny → select 3 segments → save profile
 - [ ] Load same photo as inspection → run ECC → verify shift ≈ 0 ± 0.5 px
 - [ ] Shift photo 10 px → verify ~10 px shift reported
-- [ ] First DexiNed use triggers download progress dialog
+- [ ] DexiNed funguje okamžite bez internetu (ONNX model v repozitári)
 - [ ] Duplicate a profile, edit it — verify original unchanged
 - [ ] Delete profile id=1, create new → verify id=1 is reused
 
 ---
 
-*Last updated: Phase 1 — projekt scaffold, ProfileManager, GitHub repo vytvorený*
+*Last updated: DexiNed migrácia na ONNX (cv2.dnn), váhy bundled v repozitári (~47 MB), odstránená závislosť PyTorch/gdown*

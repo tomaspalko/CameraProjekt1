@@ -4,6 +4,14 @@ Launches the PyQt6 application with a dark Fusion palette.
 """
 
 import sys
+
+# torch musí byť importovaný pred PyQt6 — na Windows Qt zmení DLL search path
+# a spôsobí WinError 1114 pri neskoršom načítaní c10.dll.
+try:
+    import torch as _torch  # noqa: F401
+except Exception:
+    pass  # GPU/torch nie je dostupný — chyba sa objaví až pri volaní run_dexined()
+
 from PyQt6.QtWidgets import QApplication, QMainWindow, QLabel
 from PyQt6.QtGui import QPalette, QColor
 from PyQt6.QtCore import Qt
