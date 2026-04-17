@@ -68,6 +68,8 @@ class InspectionResult:
     ncc_score: float                        # [-1, 1], bližšie k 1 = lepšia zhoda
     duration_ms: float
     reliability: str                        # "HIGH" | "MEDIUM" | "LOW"
+    warp_matrix: np.ndarray = None          # 2×3 (alebo 3×3 pre HOMOGRAPHY) — warp z ECC
+    motion_type: int = cv2.MOTION_EUCLIDEAN # cv2.MOTION_* konštanta zodpovedajúca warp_matrix
 
 
 class InspectionEngine:
@@ -92,6 +94,7 @@ class InspectionEngine:
         centroid_ref: tuple[float, float],
         roi: tuple[int, int, int, int],
         roi_offset: tuple[int, int] = (0, 0),
+        roi_search_expansion: int = 0,
         ecc_params: Optional[dict] = None,
         px_per_mm: Optional[float] = None,
         edge_method: str = "canny",
@@ -109,6 +112,8 @@ class InspectionEngine:
             centroid_ref:       (cx, cy) tažisko v referenčnom obrázku (full-image px).
             roi:                (x, y, w, h) oblasť záujmu.
             roi_offset:         (dx, dy) posun ROI pre inšpekčný obrázok.
+            roi_search_expansion: Rozšírenie ROI na každú stranu (px) pre vyhľadávanie.
+                                Nemá vplyv na výpočet polohy.
             ecc_params:         Slovník: motion_type (str), max_iter (int), epsilon (float).
             px_per_mm:          Ak zadané, vypočítajú sa aj mm výstupy.
             edge_method:        "canny" alebo "dexined".
@@ -146,15 +151,16 @@ class InspectionEngine:
 
         rx, ry, rw, rh = roi
         ox, oy = roi_offset
+        ex = max(0, roi_search_expansion)
 
         t_start = time.perf_counter()
 
-        # --- Orezanie na ROI ---
-        ref_crop = self._crop_gray(reference_image, rx, ry, rw, rh)
-        seg_crop = self._crop_gray(segment_map, rx, ry, rw, rh)
+        # --- Orezanie na ROI (s rozšírením pre vyhľadávanie) ---
+        ref_crop = self._crop_gray(reference_image, rx - ex, ry - ex, rw + 2 * ex, rh + 2 * ex)
+        seg_crop = self._crop_gray(segment_map,     rx - ex, ry - ex, rw + 2 * ex, rh + 2 * ex)
         insp_crop = self._crop_gray(
             inspection_image,
-            rx + ox, ry + oy, rw, rh,
+            rx - ex + ox, ry - ex + oy, rw + 2 * ex, rh + 2 * ex,
             clamp_shape=reference_image.shape[:2],
         )
 
@@ -186,16 +192,17 @@ class InspectionEngine:
         duration_ms = (time.perf_counter() - t_start) * 1000.0
 
         # --- Transformácia tažiska ---
-        # Centroid je v full-image priestore; prevedieme do ROI priestoru,
+        # Centroid je v full-image priestore; prevedieme do (rozšíreného) ROI priestoru,
         # aplikujeme warp (template→inspection), potom prevedieme späť.
+        # Rozšírenie (ex) sa odčíta aj pridá späť — nemá vplyv na výsledný posun.
         centroid_ref_roi = (
-            centroid_ref[0] - rx,
-            centroid_ref[1] - ry,
+            centroid_ref[0] - (rx - ex),
+            centroid_ref[1] - (ry - ex),
         )
         centroid_insp_roi = self._transform_point(centroid_ref_roi, warp_matrix, motion_type)
         centroid_insp_px = (
-            centroid_insp_roi[0] + rx + ox,
-            centroid_insp_roi[1] + ry + oy,
+            centroid_insp_roi[0] + (rx - ex) + ox,
+            centroid_insp_roi[1] + (ry - ex) + oy,
         )
 
         # --- Rotácia ---
@@ -236,6 +243,8 @@ class InspectionEngine:
             ncc_score=ncc_score,
             duration_ms=duration_ms,
             reliability=reliability,
+            warp_matrix=warp_matrix,
+            motion_type=motion_type,
         )
 
     # ------------------------------------------------------------------
@@ -350,7 +359,8 @@ class InspectionEngine:
         # default: canny
         t1 = edge_params.get("threshold1", 50.0)
         t2 = edge_params.get("threshold2", 150.0)
-        return self._edge_detector.run_canny(gray_crop, threshold1=t1, threshold2=t2)
+        blur_k = edge_params.get("blur_kernel", 0)
+        return self._edge_detector.run_canny(gray_crop, threshold1=t1, threshold2=t2, blur_kernel=blur_k)
 
     @staticmethod
     def _crop_gray(

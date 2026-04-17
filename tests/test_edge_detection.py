@@ -94,7 +94,45 @@ def test_canny_high_threshold_fewer_edges(detector, circle_gray):
 
 
 # ---------------------------------------------------------------------------
-# DexiNed testy (7–9) — vyžadujú stiahnuté ONNX váhy
+# Gaussian blur testy (7–10)
+# ---------------------------------------------------------------------------
+
+def test_canny_blur_disabled_matches_default(detector, circle_gray):
+    """blur_kernel=0 musí dávať rovnaký výsledok ako volanie bez parametra."""
+    default = detector.run_canny(circle_gray)
+    explicit_off = detector.run_canny(circle_gray, blur_kernel=0)
+    np.testing.assert_array_equal(default, explicit_off)
+
+
+def test_canny_blur_reduces_noise_edges(detector):
+    """blur_kernel=5 musí dávať menej hrán na zašumenom obrázku ako blur=0."""
+    rng = np.random.default_rng(42)
+    noisy = rng.integers(0, 256, (128, 128), dtype=np.uint8)
+    without_blur = detector.run_canny(noisy, blur_kernel=0)
+    with_blur = detector.run_canny(noisy, blur_kernel=5)
+    assert np.count_nonzero(with_blur) < np.count_nonzero(without_blur), (
+        "Gaussian blur mal redukovať počet falošných hrán na zašumenom obrázku"
+    )
+
+
+@pytest.mark.parametrize("k", [3, 5, 7])
+def test_canny_blur_kernels_valid(detector, circle_gray, k):
+    """Každý povolený kernel (3, 5, 7) musí vrátiť správny tvar a dtype."""
+    result = detector.run_canny(circle_gray, blur_kernel=k)
+    assert result.shape == circle_gray.shape[:2]
+    assert result.dtype == np.uint8
+    assert set(np.unique(result)).issubset({0, 255})
+
+
+def test_canny_blur_even_kernel_clamped(detector, circle_gray):
+    """Párny kernel (4) nesmie vyvolať výnimku — interný clamp ho zaokrúhli na 5."""
+    result = detector.run_canny(circle_gray, blur_kernel=4)
+    assert result.shape == circle_gray.shape[:2]
+    assert result.dtype == np.uint8
+
+
+# ---------------------------------------------------------------------------
+# DexiNed testy — vyžadujú stiahnuté ONNX váhy
 # ---------------------------------------------------------------------------
 
 @skip_dexined

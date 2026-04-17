@@ -56,14 +56,17 @@ class EdgeDetector:
         image: np.ndarray,
         threshold1: float = 50.0,
         threshold2: float = 150.0,
+        blur_kernel: int = 0,
     ) -> np.ndarray:
         """
         Detekuje hrany pomocou Canny algoritmu.
 
         Args:
-            image:      Vstupný obrázok (grayscale alebo BGR uint8).
-            threshold1: Dolný prah hysterézy.
-            threshold2: Horný prah hysterézy.
+            image:       Vstupný obrázok (grayscale alebo BGR uint8).
+            threshold1:  Dolný prah hysterézy.
+            threshold2:  Horný prah hysterézy.
+            blur_kernel: Veľkosť jadra Gaussian blur pred Canny (0 = vypnuté,
+                         inak musí byť nepárne: 3, 5, 7, …).
 
         Returns:
             Binárna uint8 mapa hrán (0 / 255), rovnaké H×W ako vstup.
@@ -72,6 +75,9 @@ class EdgeDetector:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         else:
             gray = image.copy()
+        if blur_kernel > 0:
+            k = blur_kernel if blur_kernel % 2 == 1 else blur_kernel + 1
+            gray = cv2.GaussianBlur(gray, (k, k), 0)
         return cv2.Canny(gray, threshold1, threshold2)
 
     # ------------------------------------------------------------------

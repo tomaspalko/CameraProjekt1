@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
+    QComboBox,
     QRadioButton,
     QScrollArea,
     QSlider,
@@ -297,6 +298,20 @@ class ProfileTab(QWidget):
         self._slider_t2.value_changed.connect(self._schedule_edge_refresh)
         layout.addWidget(self._slider_t2)
 
+        blur_row = QHBoxLayout()
+        blur_lbl = QLabel("Blur:")
+        blur_lbl.setFixedWidth(72)
+        blur_row.addWidget(blur_lbl)
+        self._combo_blur = QComboBox()
+        self._combo_blur.addItem("Vypnuté (0)", 0)
+        self._combo_blur.addItem("3 × 3", 3)
+        self._combo_blur.addItem("5 × 5", 5)
+        self._combo_blur.addItem("7 × 7", 7)
+        self._combo_blur.setEnabled(False)
+        self._combo_blur.currentIndexChanged.connect(self._schedule_edge_refresh)
+        blur_row.addWidget(self._combo_blur, 1)
+        layout.addLayout(blur_row)
+
         self._slider_conf = _SliderSpinPair("Spolah.:", 0.0, 1.0, step=0.01, decimals=2)
         self._slider_conf.set_value(0.5)
         self._slider_conf.setEnabled(False)
@@ -381,8 +396,9 @@ class ProfileTab(QWidget):
 
         edge_controls_enabled = is_roi
         for w in (
-            self._slider_t1, self._slider_t2, self._slider_conf,
-            self._slider_min_len, self._radio_canny, self._radio_dexined,
+            self._slider_t1, self._slider_t2, self._combo_blur,
+            self._slider_conf, self._slider_min_len,
+            self._radio_canny, self._radio_dexined,
         ):
             w.setEnabled(edge_controls_enabled)
 
@@ -558,6 +574,7 @@ class ProfileTab(QWidget):
                     self._image,
                     threshold1=int(self._slider_t1.value()),
                     threshold2=int(self._slider_t2.value()),
+                    blur_kernel=self._combo_blur.currentData(),
                 )
             else:
                 edge_map = self._detector.run_dexined(
@@ -749,6 +766,7 @@ class ProfileTab(QWidget):
             "canny_params": {
                 "threshold1": int(self._slider_t1.value()),
                 "threshold2": int(self._slider_t2.value()),
+                "blur_kernel": self._combo_blur.currentData(),
             },
             "dexined_params": {"confidence": self._slider_conf.value()},
             "min_segment_length": int(self._slider_min_len.value()),
@@ -798,6 +816,9 @@ class ProfileTab(QWidget):
         canny = profile.get("canny_params", {})
         self._slider_t1.set_value(canny.get("threshold1", 50))
         self._slider_t2.set_value(canny.get("threshold2", 150))
+        blur_k = canny.get("blur_kernel", 0)
+        idx = self._combo_blur.findData(blur_k)
+        self._combo_blur.setCurrentIndex(idx if idx >= 0 else 0)
         self._slider_conf.set_value(
             profile.get("dexined_params", {}).get("confidence", 0.5)
         )
