@@ -206,3 +206,48 @@ def test_hit_test_area_returns_overlapping(proc, two_circles_edge_map):
     all_indices = proc.hit_test_area(segments, (0, 0, 256, 256))
     segment_indices = {s.index for s in segments}
     assert set(all_indices) == segment_indices
+
+
+# ---------------------------------------------------------------------------
+# fit_contour_to_line
+# ---------------------------------------------------------------------------
+
+def test_fit_contour_to_line_shape_and_dtype():
+    rng = np.random.default_rng(42)
+    xs = np.arange(10, 60, dtype=np.int32)
+    ys = (100 + rng.integers(-2, 3, size=50)).astype(np.int32)
+    contour = np.stack([xs, ys], axis=1).reshape(-1, 1, 2)
+    result = SegmentProcessor.fit_contour_to_line(contour)
+    assert result is not None
+    assert result.ndim == 3 and result.shape[1] == 1 and result.shape[2] == 2
+    assert result.dtype == np.int32
+
+
+def test_fit_contour_to_line_is_straight():
+    rng = np.random.default_rng(7)
+    xs = np.arange(20, 80, dtype=np.int32)
+    ys = (50 + rng.integers(-3, 4, size=60)).astype(np.int32)
+    contour = np.stack([xs, ys], axis=1).reshape(-1, 1, 2)
+    result = SegmentProcessor.fit_contour_to_line(contour)
+    assert result is not None
+    pts = result[:, 0, :].astype(float)
+    fit2 = cv2.fitLine(result.astype(np.float32), cv2.DIST_L2, 0, 0.01, 0.01)
+    vx, vy, x0, y0 = fit2[0], fit2[1], fit2[2], fit2[3]
+    dx, dy = pts[:, 0] - x0, pts[:, 1] - y0
+    residuals = np.abs(dx * vy - dy * vx)
+    assert residuals.max() < 0.6
+
+
+def test_fit_contour_to_line_single_point_returns_none():
+    single = np.array([[[10, 20]]], dtype=np.int32)
+    assert SegmentProcessor.fit_contour_to_line(single) is None
+
+
+def test_fit_contour_to_line_extent_coverage():
+    xs = np.arange(5, 55, dtype=np.int32)
+    ys = np.full(50, 30, dtype=np.int32)
+    contour = np.stack([xs, ys], axis=1).reshape(-1, 1, 2)
+    result = SegmentProcessor.fit_contour_to_line(contour)
+    assert result is not None
+    result_span = int(result[:, 0, 0].max()) - int(result[:, 0, 0].min())
+    assert result_span >= 0.8 * (55 - 5)

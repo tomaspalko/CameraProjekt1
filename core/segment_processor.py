@@ -272,6 +272,29 @@ class SegmentProcessor:
             return None
         return kept.reshape(-1, 1, 2).astype(np.int32)
 
+    @staticmethod
+    def fit_contour_to_line(contour: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Fituje kontúru na priamku pomocou cv2.fitLine (DIST_L2).
+
+        Returns:
+            Hustá kontúra (N, 1, 2) int32 pozdĺž priamky, alebo None ak < 2 bodov.
+        """
+        pts = contour[:, 0, :].astype(np.float32)  # (N, 2)
+        if len(pts) < 2:
+            return None
+        line = cv2.fitLine(pts, cv2.DIST_L2, 0, 0.01, 0.01).flatten()
+        vx, vy = float(line[0]), float(line[1])
+        x0, y0 = float(line[2]), float(line[3])
+        # Project all points onto line direction → find extent [t_min, t_max]
+        t = (pts[:, 0] - x0) * vx + (pts[:, 1] - y0) * vy
+        t_min, t_max = float(t.min()), float(t.max())
+        n_pts = max(2, int(round(t_max - t_min)))
+        ts = np.linspace(t_min, t_max, n_pts)
+        xs = np.round(x0 + ts * vx).astype(np.int32)
+        ys = np.round(y0 + ts * vy).astype(np.int32)
+        return np.stack([xs, ys], axis=1).reshape(-1, 1, 2)
+
     def hit_test_area(
         self,
         segments: list[Segment],

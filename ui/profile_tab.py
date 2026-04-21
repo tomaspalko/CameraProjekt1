@@ -338,6 +338,16 @@ class ProfileTab(QWidget):
         trim_row.addWidget(self._btn_reset_trim)
         layout.addLayout(trim_row)
 
+        fit_row = QHBoxLayout()
+        self._btn_fit_line = QPushButton("Priamka (Fit)")
+        self._btn_fit_line.setEnabled(False)
+        self._btn_fit_line.setToolTip(
+            "Vyrovná vybraný segment na priamku (cv2.fitLine). Vyberte presne 1 segment."
+        )
+        self._btn_fit_line.clicked.connect(self._on_fit_line)
+        fit_row.addWidget(self._btn_fit_line)
+        layout.addLayout(fit_row)
+
         parent.addWidget(box)
 
     def _build_scale_section(self, parent: QVBoxLayout) -> None:
@@ -674,6 +684,7 @@ class ProfileTab(QWidget):
             and self._state == _ROI_SELECTED
         )
         self._btn_trim.setEnabled(can_trim)
+        self._btn_fit_line.setEnabled(can_trim)
         if can_trim:
             idx = next(iter(self._selected_indices))
             self._btn_reset_trim.setEnabled(idx in self._trimmed_contours)
@@ -690,6 +701,24 @@ class ProfileTab(QWidget):
         idx = next(iter(self._selected_indices))
         self._push_undo()
         self._trimmed_contours.pop(idx, None)
+        self._render_overlay()
+        self._update_trim_buttons()
+
+    def _on_fit_line(self) -> None:
+        if len(self._selected_indices) != 1:
+            return
+        idx = next(iter(self._selected_indices))
+        seg = next((s for s in self._segments if s.index == idx), None)
+        if seg is None:
+            return
+        # Use trimmed variant as input if available (allows chaining trim → fit)
+        source = self._trimmed_contours.get(idx, seg.contour)
+        result = SegmentProcessor.fit_contour_to_line(source)
+        if result is None:
+            QMessageBox.warning(self, "Fit to Line", "Segment má príliš málo bodov.")
+            return
+        self._push_undo()
+        self._trimmed_contours[idx] = result
         self._render_overlay()
         self._update_trim_buttons()
 
