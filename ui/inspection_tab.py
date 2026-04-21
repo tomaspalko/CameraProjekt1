@@ -37,6 +37,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from core.edge_detection import EdgeDetector
 from core.inspection_engine import AlignmentStrategy, InspectionEngine, InspectionResult
 from core.profile_manager import ProfileManager
 from core.segment_processor import SegmentProcessor
@@ -64,6 +65,7 @@ class InspectionWorker(QObject):
         roi_offset: tuple,
         ecc_params: dict,
         px_per_mm: Optional[float],
+        roi_search_expansion: int = 0,
         edge_method: str = "canny",
         edge_params: Optional[dict] = None,
         alignment_strategy: AlignmentStrategy = AlignmentStrategy.ECC_ONLY,
@@ -77,6 +79,7 @@ class InspectionWorker(QObject):
         self._centroid = centroid_ref
         self._roi = roi
         self._roi_offset = roi_offset
+        self._roi_search_expansion = roi_search_expansion
         self._ecc_params = ecc_params
         self._px_per_mm = px_per_mm
         self._edge_method = edge_method
@@ -93,6 +96,7 @@ class InspectionWorker(QObject):
                 self._centroid,
                 self._roi,
                 roi_offset=self._roi_offset,
+                roi_search_expansion=self._roi_search_expansion,
                 ecc_params=self._ecc_params,
                 px_per_mm=self._px_per_mm,
                 edge_method=self._edge_method,
@@ -309,6 +313,17 @@ class InspectionTab(QWidget):
         offset_row.addWidget(self._spin_dy)
         layout.addRow("ROI offset:", offset_row)
 
+        self._spin_expansion = QSpinBox()
+        self._spin_expansion.setRange(0, 512)
+        self._spin_expansion.setValue(0)
+        self._spin_expansion.setToolTip(
+            "Rozšírenie ROI pre vyhľadávanie.\n"
+            "Zväčší oblasť výrezu na všetkých stranách o zadaný počet pixelov.\n"
+            "Nemá vplyv na výpočet polohy."
+        )
+        self._spin_expansion.valueChanged.connect(self._on_expansion_changed)
+        layout.addRow("ROI expanzia:", self._spin_expansion)
+
         # --- Obnova hodnôt z profilu ---
         ecc = self._profile.get("ecc_params", {})
         if ecc.get("motion_type") in ("MOTION_TRANSLATION", "MOTION_EUCLIDEAN", "MOTION_AFFINE"):
@@ -319,6 +334,7 @@ class InspectionTab(QWidget):
         offset = self._profile.get("roi_inspection_offset", {})
         self._spin_dx.setValue(int(offset.get("dx", 0)))
         self._spin_dy.setValue(int(offset.get("dy", 0)))
+        self._spin_expansion.setValue(int(self._profile.get("roi_search_expansion", 0)))
 
         strategy_str = self._profile.get("alignment_strategy", "ecc_only")
         self._combo_strategy.setCurrentText(
@@ -425,6 +441,9 @@ class InspectionTab(QWidget):
         if c:
             self._viewer_ref.set_crosshairs([(c.get("x", 0.0), c.get("y", 0.0))])
 
+        # Zobraziť rozšírenú vyhľadávaciu ROI na inspekčnom vieweri
+        self._on_expansion_changed(self._spin_expansion.value())
+
         self._update_run_button()
 
     # ------------------------------------------------------------------
@@ -488,6 +507,21 @@ class InspectionTab(QWidget):
             self._viewer_ref.set_overlay(self._seg_map)
         else:
             self._viewer_ref.set_overlay(None)
+        if not checked:
+            self._viewer_insp.set_overlay(None)
+
+    def _on_expansion_changed(self, value: int) -> None:
+        """Aktualizuje zobrazenie vyhľadávacej ROI na inspekčnom vieweri a uloží do profilu."""
+        roi_data = self._profile.get("roi", {})
+        rx = int(roi_data.get("x", 0))
+        ry = int(roi_data.get("y", 0))
+        rw = int(roi_data.get("w", 0))
+        rh = int(roi_data.get("h", 0))
+        e = max(0, value)
+        from PyQt6.QtCore import QRect
+        self._viewer_insp.set_roi(QRect(rx - e, ry - e, rw + 2 * e, rh + 2 * e))
+        self._profile["roi_search_expansion"] = e
+        self._pm.save_profile(self._profile)
 
     # ------------------------------------------------------------------
     # Spustenie inspekcie (QThread)
@@ -554,6 +588,7 @@ class InspectionTab(QWidget):
             roi_offset=roi_offset,
             ecc_params=ecc_params,
             px_per_mm=px_per_mm,
+            roi_search_expansion=self._spin_expansion.value(),
             edge_method=edge_method,
             edge_params=edge_params,
             alignment_strategy=alignment_strategy,
@@ -575,9 +610,73 @@ class InspectionTab(QWidget):
         self._viewer_ref.set_crosshairs([result.centroid_ref_px])
         self._viewer_insp.set_crosshairs([result.centroid_insp_px])
 
-        # Overlay na inspekcionom vieweri (segment mapa pre vizualnu kontrolu)
-        if self._seg_map is not None and self._chk_show_segments.isChecked():
-            self._viewer_insp.set_overlay(self._seg_map)
+        # Overlay na inspekcionom vieweri — zarovnané segmenty
+        if self._chk_show_segments.isChecked():
+            overlay = self._build_aligned_overlay(result)
+            self._viewer_insp.set_overlay(overlay)
+
+    def _build_aligned_overlay(self, result) -> Optional[np.ndarray]:
+        """
+        Spustí detekciu hrán na inšpekčnom obrázku, extrahuje segmenty a vráti
+        BGR overlay s iba vybranými segmentmi (definovanými v profile).
+        Fallback na statickú segment_map pri chybe.
+        """
+        if self._insp_image is None:
+            return None
+
+        try:
+            edge_method = self._profile.get("edge_method", "canny")
+            if edge_method == "dexined":
+                edge_params = self._profile.get("dexined_params", {})
+            else:
+                edge_params = self._profile.get("canny_params", {})
+
+            min_seg_len = float(self._profile.get("min_segment_length", 20))
+            segment_indices = set(self._profile.get("segment_indices", []))
+
+            roi_data = self._profile.get("roi", {})
+            rx = int(roi_data.get("x", 0))
+            ry = int(roi_data.get("y", 0))
+            rw = int(roi_data.get("w", self._insp_image.shape[1]))
+            rh = int(roi_data.get("h", self._insp_image.shape[0]))
+            ox, oy = self._spin_dx.value(), self._spin_dy.value()
+
+            # Grayscale konverzia
+            gray = (
+                cv2.cvtColor(self._insp_image, cv2.COLOR_BGR2GRAY)
+                if self._insp_image.ndim == 3
+                else self._insp_image
+            )
+
+            # Detekcia hrán na inšpekčnom obrázku
+            detector = EdgeDetector()
+            if edge_method == "dexined":
+                edge_map = detector.run_dexined(
+                    gray, confidence=edge_params.get("confidence", 0.5)
+                )
+            else:
+                edge_map = detector.run_canny(
+                    gray,
+                    threshold1=edge_params.get("threshold1", 50.0),
+                    threshold2=edge_params.get("threshold2", 150.0),
+                )
+
+            # Extrakcia segmentov z ROI inšpekčného obrázka (s offsetom)
+            insp_roi = (rx + ox, ry + oy, rw, rh)
+            segments = self._processor.extract_segments(edge_map, min_seg_len, roi=insp_roi)
+
+            # Filtrovanie iba vybraných segmentov (podľa indexov z profilu)
+            selected = [s for s in segments if s.index in segment_indices]
+
+            # Renderovanie na prázdne plátno
+            H, W = self._insp_image.shape[:2]
+            canvas = np.zeros((H, W, 3), dtype=np.uint8)
+            for seg in selected:
+                cv2.drawContours(canvas, [seg.contour], -1, (118, 230, 0), 1)
+
+            return canvas
+        except Exception:
+            return self._seg_map
 
     def _on_error(self, msg: str) -> None:
         QMessageBox.critical(self, "Chyba inspekcie", msg)

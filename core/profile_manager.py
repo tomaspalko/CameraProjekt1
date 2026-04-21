@@ -33,6 +33,7 @@ REQUIRED_KEYS: frozenset[str] = frozenset(
         "segment_indices",
         "ecc_params",
         "roi_inspection_offset",
+        "roi_search_expansion",
         "paths",
         "alignment_strategy",
         "template_params",
@@ -59,6 +60,7 @@ def _default_profile(profile_id: int) -> dict:
             "epsilon": 1e-5,
         },
         "roi_inspection_offset": {"dx": 0, "dy": 0},
+        "roi_search_expansion": 0,
         "paths": {
             "reference_image": f"profiles/{profile_id}/reference.png",
             "segment_map": f"profiles/{profile_id}/segment_map.png",
@@ -81,6 +83,8 @@ def _migrate_profile(data: dict) -> dict:
         "search_expansion": 0.5,
         "method": "TM_CCOEFF_NORMED",
     })
+    data.setdefault("roi_search_expansion", 0)
+    data.setdefault("trimmed_contours", {})
     return data
 
 

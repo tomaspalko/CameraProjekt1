@@ -157,9 +157,10 @@ class ProfileTab(QWidget):
         self._roi: Optional[QRect] = None
         self._segments: list[Segment] = []
         self._selected_indices: set[int] = set()
+        self._trimmed_contours: dict[int, np.ndarray] = {}
         self._show_edges: bool = False
         self._scale: Optional[float] = None
-        self._undo_stack: list[tuple[frozenset, Optional[QRect]]] = []
+        self._undo_stack: list[tuple[frozenset, Optional[QRect], dict]] = []
         self._state: str = _IDLE
         self._initializing: bool = False
 
@@ -218,6 +219,7 @@ class ProfileTab(QWidget):
         self._viewer.pixel_clicked.connect(self._on_pixel_clicked)
         self._viewer.pixel_hovered.connect(self._on_pixel_hovered)
         self._viewer.scale_point_placed.connect(self._on_scale_point_placed)
+        self._viewer.trim_region_selected.connect(self._on_trim_region_selected)
         right_layout.addWidget(self._viewer, 1)
 
         self._coord_label = QLabel("x: --  y: --")
@@ -324,6 +326,18 @@ class ProfileTab(QWidget):
         self._slider_min_len.value_changed.connect(self._schedule_edge_refresh)
         layout.addWidget(self._slider_min_len)
 
+        trim_row = QHBoxLayout()
+        self._btn_trim = QPushButton("Orezat segment")
+        self._btn_trim.setEnabled(False)
+        self._btn_trim.setToolTip("Vyberte presne 1 segment a zobrazte hrany")
+        self._btn_trim.clicked.connect(self._on_trim)
+        trim_row.addWidget(self._btn_trim)
+        self._btn_reset_trim = QPushButton("Zrusit orez")
+        self._btn_reset_trim.setEnabled(False)
+        self._btn_reset_trim.clicked.connect(self._on_reset_trim)
+        trim_row.addWidget(self._btn_reset_trim)
+        layout.addLayout(trim_row)
+
         parent.addWidget(box)
 
     def _build_scale_section(self, parent: QVBoxLayout) -> None:
@@ -410,6 +424,8 @@ class ProfileTab(QWidget):
                 if not is_image
                 else "Nakresli oblast zaujmu (ROI)."
             )
+
+        self._update_trim_buttons()
 
     # ------------------------------------------------------------------
     # Obrazok
@@ -531,6 +547,7 @@ class ProfileTab(QWidget):
             self._viewer.set_overlay(None)
             self._viewer.set_mode("view")
             self._label_instr.setText("Zobraz hrany pre vyber segmentov.")
+        self._update_trim_buttons()
 
     def _on_method_changed(self, checked: bool) -> None:
         if self._initializing or not checked:
@@ -597,6 +614,7 @@ class ProfileTab(QWidget):
         valid = {s.index for s in new_segs}
         self._segments = new_segs
         self._selected_indices &= valid
+        self._trimmed_contours.clear()
         self._render_overlay()
         self._update_sel_count()
 
@@ -626,23 +644,71 @@ class ProfileTab(QWidget):
         self._undo_stack.append((
             frozenset(self._selected_indices),
             QRect(self._roi) if self._roi else None,
+            dict(self._trimmed_contours),
         ))
         self._btn_undo.setEnabled(True)
 
     def _on_undo(self) -> None:
         if not self._undo_stack:
             return
-        indices, roi = self._undo_stack.pop()
+        entry = self._undo_stack.pop()
+        indices, roi = entry[0], entry[1]
         self._selected_indices = set(indices)
+        self._trimmed_contours = dict(entry[2]) if len(entry) > 2 else {}
         if roi is not None:
             self._roi = QRect(roi)
             self._viewer.set_roi(roi)
         self._render_overlay()
         self._update_sel_count()
+        self._update_trim_buttons()
         self._btn_undo.setEnabled(bool(self._undo_stack))
 
     def _update_sel_count(self) -> None:
         self._label_sel_count.setText(f"Vybranych: {len(self._selected_indices)}")
+        self._update_trim_buttons()
+
+    def _update_trim_buttons(self) -> None:
+        can_trim = (
+            self._show_edges
+            and len(self._selected_indices) == 1
+            and self._state == _ROI_SELECTED
+        )
+        self._btn_trim.setEnabled(can_trim)
+        if can_trim:
+            idx = next(iter(self._selected_indices))
+            self._btn_reset_trim.setEnabled(idx in self._trimmed_contours)
+        else:
+            self._btn_reset_trim.setEnabled(False)
+
+    def _on_trim(self) -> None:
+        self._viewer.set_mode("trim_region")
+        self._label_instr.setText("Nakresli oblast ktoru chces zachovat.")
+
+    def _on_reset_trim(self) -> None:
+        if len(self._selected_indices) != 1:
+            return
+        idx = next(iter(self._selected_indices))
+        self._push_undo()
+        self._trimmed_contours.pop(idx, None)
+        self._render_overlay()
+        self._update_trim_buttons()
+
+    def _on_trim_region_selected(self, rect: QRect) -> None:
+        if len(self._selected_indices) != 1:
+            return
+        idx = next(iter(self._selected_indices))
+        seg = next((s for s in self._segments if s.index == idx), None)
+        if seg is None:
+            return
+        result = self._processor.trim_contour_to_rect(
+            seg.contour, (rect.x(), rect.y(), rect.width(), rect.height())
+        )
+        if result is None:
+            return
+        self._push_undo()
+        self._trimmed_contours[idx] = result
+        self._render_overlay()
+        self._update_trim_buttons()
 
     def _render_overlay(self) -> None:
         if self._image is None:
@@ -650,7 +716,10 @@ class ProfileTab(QWidget):
             return
         h, w = self._image.shape[:2]
         overlay = self._processor.render_segment_map(
-            (h, w), self._segments, list(self._selected_indices)
+            (h, w),
+            self._segments,
+            list(self._selected_indices),
+            trimmed_contours=self._trimmed_contours or None,
         )
         self._viewer.set_overlay(overlay)
 
@@ -737,7 +806,8 @@ class ProfileTab(QWidget):
         # Vypocitaj centroid
         if self._selected_indices and self._segments:
             centroid = self._processor.compute_combined_centroid(
-                self._segments, list(self._selected_indices)
+                self._segments, list(self._selected_indices),
+                trimmed_contours=self._trimmed_contours or None,
             )
         else:
             centroid = (
@@ -749,7 +819,8 @@ class ProfileTab(QWidget):
         h, w = self._image.shape[:2]
         if self._segments:
             seg_map = self._processor.render_segment_map(
-                (h, w), self._segments, list(self._selected_indices)
+                (h, w), self._segments, list(self._selected_indices),
+                trimmed_contours=self._trimmed_contours or None,
             )
         else:
             seg_map = np.zeros((h, w, 3), dtype=np.uint8)
@@ -773,6 +844,10 @@ class ProfileTab(QWidget):
             "scale_px_per_mm": self._scale,
             "centroid_ref": {"x": centroid[0], "y": centroid[1]},
             "segment_indices": sorted(self._selected_indices),
+            "trimmed_contours": {
+                str(idx): contour.reshape(-1, 2).tolist()
+                for idx, contour in self._trimmed_contours.items()
+            },
             "ecc_params": self._profile.get("ecc_params", {
                 "motion_type": "MOTION_EUCLIDEAN",
                 "max_iter": 200,
@@ -883,6 +958,15 @@ class ProfileTab(QWidget):
             saved = set(profile.get("segment_indices", []))
             valid = {s.index for s in self._segments}
             self._selected_indices = saved & valid
+
+            raw_tc = profile.get("trimmed_contours", {})
+            self._trimmed_contours = {}
+            for k, pts_list in raw_tc.items():
+                idx = int(k)
+                if idx in valid:
+                    arr = np.array(pts_list, dtype=np.int32).reshape(-1, 1, 2)
+                    if arr.shape[0] >= 2:
+                        self._trimmed_contours[idx] = arr
 
             self._show_edges = True
             self._btn_toggle_edges.blockSignals(True)

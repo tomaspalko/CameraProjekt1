@@ -112,6 +112,7 @@ CameraProjekt1/
 | ID = lowest free positive integer | Scan `profiles/` dir, find `min(ℕ \ existing_ids)` |
 | Undo = state snapshot list | Simpler than command pattern for small state |
 | QThread for ECC inspection | `findTransformECC` can take 100–500 ms; keeps GUI responsive |
+| `warp_matrix` + `motion_type` v `InspectionResult` | UI môže transformovať segmenty do inšp. priestoru bez opätovného ECC |
 
 ---
 
@@ -140,6 +141,8 @@ Select profile → reference image + segment map shown
             └─ Run Inspection
                  └─ Output: centroid shift (px + mm), rotation °,
                             NCC score, reliability, duration ms
+                 └─ Overlay: vybrané segmenty (zelené) zobrazené na novej pozícii
+                             v inšpekčnom vieweri (transformované cez ECC warp maticu)
 ```
 
 ---

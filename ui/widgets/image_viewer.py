@@ -45,6 +45,7 @@ _MODE_CURSOR = {
     "roi": Qt.CursorShape.CrossCursor,
     "click_segment": Qt.CursorShape.PointingHandCursor,
     "scale_tool": Qt.CursorShape.CrossCursor,
+    "trim_region": Qt.CursorShape.CrossCursor,
 }
 
 _ROI_COLOR = QColor(0, 120, 215)       # #0078d7
@@ -62,6 +63,7 @@ class ImageViewer(QWidget):
     pixel_clicked = pyqtSignal(QPoint)
     pixel_hovered = pyqtSignal(QPoint)
     scale_point_placed = pyqtSignal(int, QPoint)
+    trim_region_selected = pyqtSignal(QRect)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -245,7 +247,7 @@ class ImageViewer(QWidget):
                 self._pan_origin = QPointF(self._pan_offset)
                 self.setCursor(Qt.CursorShape.ClosedHandCursor)
 
-            elif self._mode == "roi":
+            elif self._mode in ("roi", "trim_region"):
                 self._roi_start = img_qpt
                 self._roi_current = QRect(img_qpt, img_qpt)
 
@@ -273,8 +275,8 @@ class ImageViewer(QWidget):
             self.update()
             return
 
-        # ROI rubber-band
-        if self._mode == "roi" and self._roi_start is not None:
+        # ROI / trim rubber-band
+        if self._mode in ("roi", "trim_region") and self._roi_start is not None:
             self._roi_current = QRect(self._roi_start, img_qpt).normalized()
             self.update()
 
@@ -291,6 +293,14 @@ class ImageViewer(QWidget):
                     self.roi_selected.emit(self._roi_rect)
                 self._roi_start = None
                 self._roi_current = None
+                self.update()
+
+            elif self._mode == "trim_region" and self._roi_current is not None:
+                if self._roi_current.width() > 5 and self._roi_current.height() > 5:
+                    self.trim_region_selected.emit(QRect(self._roi_current))
+                self._roi_start = None
+                self._roi_current = None
+                self.set_mode("click_segment")
                 self.update()
 
     # ------------------------------------------------------------------

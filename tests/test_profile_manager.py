@@ -48,7 +48,9 @@ def test_load_roundtrip(profile_manager: ProfileManager) -> None:
     data["canny_params"]["threshold1"] = 99
     profile_manager.save_profile(data)
     loaded = profile_manager.load_profile(data["id"])
-    assert loaded == data
+    # Migration may add optional keys (e.g. trimmed_contours) not present in data
+    for key, value in data.items():
+        assert loaded[key] == value
 
 
 # ---------------------------------------------------------------------------

@@ -122,11 +122,13 @@ class SegmentProcessor:
         self,
         segments: list[Segment],
         selected_indices: list[int],
+        trimmed_contours: Optional[dict[int, np.ndarray]] = None,
     ) -> tuple[float, float]:
         """
         Vypočíta vážené tažisko vybraných segmentov.
 
-        Váha každého segmentu = jeho arc_length.
+        Váha každého segmentu = jeho arc_length (alebo dĺžka orezanej kontúry).
+        Ak je pre segment dostupná orezaná kontúra, použije sa na výpočet tažiska.
         Raises ValueError ak selected_indices je prázdny.
         """
         if not selected_indices:
@@ -136,14 +138,35 @@ class SegmentProcessor:
         if not selected:
             raise ValueError("Žiadny zo zadaných indexov nebol nájdený v zozname segmentov.")
 
-        total_weight = sum(s.arc_length for s in selected)
+        tc = trimmed_contours or {}
+        total_weight = 0.0
+        cx_acc = 0.0
+        cy_acc = 0.0
+
+        for s in selected:
+            if s.index in tc:
+                trimmed = tc[s.index]
+                M = cv2.moments(trimmed)
+                if M["m00"] != 0:
+                    cx_i = M["m10"] / M["m00"]
+                    cy_i = M["m01"] / M["m00"]
+                else:
+                    cx_i = float(trimmed[:, 0, 0].mean())
+                    cy_i = float(trimmed[:, 0, 1].mean())
+                weight = float(cv2.arcLength(trimmed, closed=False))
+            else:
+                cx_i, cy_i = s.centroid
+                weight = s.arc_length
+            cx_acc += cx_i * weight
+            cy_acc += cy_i * weight
+            total_weight += weight
+
         if total_weight == 0:
-            # Fallback: aritmetický priemer
             cx = sum(s.centroid[0] for s in selected) / len(selected)
             cy = sum(s.centroid[1] for s in selected) / len(selected)
         else:
-            cx = sum(s.centroid[0] * s.arc_length for s in selected) / total_weight
-            cy = sum(s.centroid[1] * s.arc_length for s in selected) / total_weight
+            cx = cx_acc / total_weight
+            cy = cy_acc / total_weight
 
         return (cx, cy)
 
@@ -156,17 +179,20 @@ class SegmentProcessor:
         image_shape: tuple[int, int],
         segments: list[Segment],
         selected_indices: list[int],
+        trimmed_contours: Optional[dict[int, np.ndarray]] = None,
     ) -> np.ndarray:
         """
         Vykreslí farebnú mapu segmentov na čiernom pozadí.
 
         - Vybrané segmenty: zelená (0, 255, 0)
         - Ostatné segmenty: sivá (117, 117, 117)
+        - Ak je pre segment dostupná orezaná kontúra, vykreslí sa namiesto plnej.
 
         Args:
-            image_shape:      (H, W) výstupného obrázka.
-            segments:         Zoznam všetkých segmentov.
-            selected_indices: Indexy vybraných segmentov.
+            image_shape:       (H, W) výstupného obrázka.
+            segments:          Zoznam všetkých segmentov.
+            selected_indices:  Indexy vybraných segmentov.
+            trimmed_contours:  Voliteľný slovník {index: orezaná kontúra}.
 
         Returns:
             BGR uint8 obrázok tvaru (H, W, 3).
@@ -175,15 +201,18 @@ class SegmentProcessor:
         canvas = np.zeros((h, w, 3), dtype=np.uint8)
 
         selected_set = set(selected_indices)
+        tc = trimmed_contours or {}
 
         # Najprv nevybrané (sivé), potom vybrané (zelené) — vybrané sú navrchu
         for seg in segments:
             if seg.index not in selected_set:
-                cv2.drawContours(canvas, [seg.contour], -1, (117, 117, 117), 1)
+                contour = tc.get(seg.index, seg.contour)
+                cv2.drawContours(canvas, [contour], -1, (117, 117, 117), 1)
 
         for seg in segments:
             if seg.index in selected_set:
-                cv2.drawContours(canvas, [seg.contour], -1, (0, 255, 0), 1)
+                contour = tc.get(seg.index, seg.contour)
+                cv2.drawContours(canvas, [contour], -1, (0, 255, 0), 1)
 
         return canvas
 
@@ -215,6 +244,33 @@ class SegmentProcessor:
                 best_index = seg.index
 
         return best_index
+
+    @staticmethod
+    def trim_contour_to_rect(
+        contour: np.ndarray,
+        rect: tuple[int, int, int, int],
+    ) -> Optional[np.ndarray]:
+        """
+        Oreže kontúru na body, ktoré ležia vnútri obdĺžnika rect.
+
+        Args:
+            contour: Kontúra tvaru (N, 1, 2), dtype int32.
+            rect:    (x, y, w, h) v súradniciach celého obrázka.
+
+        Returns:
+            Orezaná kontúra tvaru (M, 1, 2) alebo None ak zostanú menej ako 2 body.
+        """
+        x0, y0, rw, rh = rect
+        x1, y1 = x0 + rw, y0 + rh
+        pts = contour[:, 0, :]  # (N, 2)
+        mask = (
+            (pts[:, 0] >= x0) & (pts[:, 0] < x1) &
+            (pts[:, 1] >= y0) & (pts[:, 1] < y1)
+        )
+        kept = pts[mask]
+        if len(kept) < 2:
+            return None
+        return kept.reshape(-1, 1, 2).astype(np.int32)
 
     def hit_test_area(
         self,
